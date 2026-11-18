@@ -102,7 +102,7 @@ jobs:
         run: xcodegen generate --quiet
 
       # arm64 device slice only: the vendored xcframeworks carry arm64 only.
-      # Signing is off, so no provisioning profile or team is needed.
+      # Signing is off here, so the archive itself needs no team or profile.
       - name: Archive (unsigned)
         working-directory: app
         run: |
@@ -117,7 +117,31 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             archive
 
-      - name: Package unsigned IPA
+      # On-device signers (Sideloadly, Chinese on-device signers and friends) replace an existing
+      # signature; they fail on a binary that has none, because they have to grow
+      # the __LINKEDIT signature slot themselves (CodeDirectory vs Mach-O mismatch).
+      # Ad-hoc signing every nested binary here leaves a valid CodeDirectory with
+      # room in it, so re-signing is a straight replacement.
+      - name: Ad-hoc sign
+        working-directory: app
+        run: |
+          set -euo pipefail
+          APP="build/DshIOS.xcarchive/Products/Applications/DshIOS.app"
+          find "$APP/Frameworks" -maxdepth 1 -name '*.framework' -print0 |
+            while IFS= read -r -d '' fw; do codesign --force --sign - --timestamp=none "$fw"; done
+          for ex in "$APP"/PlugIns/*.appex; do
+            if [ -d "$ex" ]; then codesign --force --sign - --timestamp=none "$ex"; fi
+          done
+          if [ -d "$APP/Watch/DshWatch.app" ]; then
+            codesign --force --sign - --timestamp=none "$APP/Watch/DshWatch.app"
+          fi
+          codesign --force --sign - --timestamp=none "$APP"
+          echo "== main app signature =="
+          codesign -dv "$APP" 2>&1 | sed -n '1,8p'
+          echo "== deep verify =="
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Package IPA
         working-directory: app
         run: |
           set -euo pipefail
@@ -129,7 +153,7 @@ jobs:
           rm -rf build/Payload build/*.ipa
           mkdir -p build/Payload
           cp -R "$APP" build/Payload/
-          IPA="$GITHUB_WORKSPACE/FishPocket-$VERSION-$BUILD-unsigned.ipa"
+          IPA="$GITHUB_WORKSPACE/DSH-$VERSION-$BUILD-unsigned.ipa"
           ( cd build && ditto -c -k --sequesterRsrc --keepParent Payload "$IPA" )
           ls -lh "$IPA"
           shasum -a 256 "$IPA" | tee "$IPA.sha256"
@@ -159,16 +183,17 @@ jobs:
           du -sh "$APP/nodejs-project" "$APP/python" 2>/dev/null || true
           echo "=== localization ==="
           ls "$APP"/*.lproj 2>/dev/null | head || true
-          echo "=== unsigned check ==="
-          ( codesign -dv "$APP" 2>&1 || true ) | head -5
+          echo "=== signature ==="
+          codesign -dv "$APP" 2>&1 | sed -n '1,8p' || true
+          codesign --verify --strict "$APP" && echo "signature verifies"
 
       - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: fish-pocket-ipa
           path: |
-            FishPocket-*.ipa
-            FishPocket-*.ipa.sha256
+            DSH-*.ipa
+            DSH-*.ipa.sha256
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
