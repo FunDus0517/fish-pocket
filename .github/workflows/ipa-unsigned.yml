@@ -135,9 +135,10 @@ jobs:
           shasum -a 256 "$IPA" | tee "$IPA.sha256"
 
       - name: Inspect package
+        continue-on-error: true
         working-directory: app
         run: |
-          set -euo pipefail
+          set -uo pipefail
           APP="build/DshIOS.xcarchive/Products/Applications/DshIOS.app"
           echo "=== app size ==="
           du -sh "$APP"
@@ -162,11 +163,12 @@ jobs:
           ( codesign -dv "$APP" 2>&1 || true ) | head -5
 
       - uses: actions/upload-artifact@v5
+        if: always()
         with:
           name: fish-pocket-ipa
           path: |
-            app/FishPocket-*.ipa
-            app/FishPocket-*.ipa.sha256
+            FishPocket-*.ipa
+            FishPocket-*.ipa.sha256
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
