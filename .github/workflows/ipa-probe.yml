@@ -1,0 +1,35 @@
+name: ipa-probe
+
+# Cheap environment probe: which macOS runner labels work, what Xcode is
+# installed, and whether the toolchain the fish-pocket build needs is there.
+on:
+  push:
+    branches: [ipa-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: xcode-27
+    timeout-minutes: 10
+    steps:
+      - name: Environment
+        run: |
+          set -x
+          sw_vers
+          uname -m
+          sysctl -n hw.ncpu
+          echo "--- Xcode ---"
+          ls -d /Applications/Xcode*.app
+          xcodebuild -version
+          xcode-select -p
+          echo "--- tools ---"
+          node --version || true
+          npm --version || true
+          for t in xcodegen cmake brew git rsync unzip zip shasum; do
+            printf '%s: ' "$t"; command -v "$t" || echo MISSING
+          done
+          echo "--- disk ---"
+          df -h /
