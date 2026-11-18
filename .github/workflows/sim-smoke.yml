@@ -1,0 +1,154 @@
+name: sim-smoke
+
+# Build fish-pocket for the iOS Simulator and actually run it: boot the app on
+# every page `-dshOpen` routes to, screenshot each one, then assert through the
+# engine's HTTP API that the bundled DSH / ds-bot versions and plugin rows are
+# the ones the repository pins. Screenshots come back as an artifact for review.
+on:
+  push:
+    branches: [ipa-smoke]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sim-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: xcode-27
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: engine/package-lock.json
+
+      - name: Select Xcode 27.2
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.2.app
+          xcodebuild -version
+
+      - name: Cache nodejs-mobile
+        id: nodejs-mobile
+        uses: actions/cache@v5
+        with:
+          path: |
+            vendor/nodejs-mobile/ios
+            vendor/nodejs-mobile/rooted
+          key: nodejs-mobile-${{ hashFiles('scripts/fetch-nodejs-mobile.sh') }}
+
+      - name: Fetch nodejs-mobile
+        if: steps.nodejs-mobile.outputs.cache-hit != 'true'
+        run: scripts/fetch-nodejs-mobile.sh
+
+      - name: Cache Python
+        id: python
+        uses: actions/cache@v5
+        with:
+          path: |
+            vendor/python/ios
+            vendor/python/rooted
+          key: python-${{ hashFiles('scripts/fetch-python.sh') }}
+
+      - name: Fetch Python
+        if: steps.python.outputs.cache-hit != 'true'
+        run: scripts/fetch-python.sh
+
+      - name: Check NodeMobile imports
+        run: scripts/check-root-imports.sh
+
+      - name: Cache libgit2
+        id: libgit2
+        uses: actions/cache@v5
+        with:
+          path: |
+            vendor/libgit2/Libgit2.xcframework
+            vendor/libgit2/ios-arm64
+            vendor/libgit2/ios-arm64-simulator
+            vendor/libgit2/macos
+          key: libgit2-${{ runner.os }}-${{ hashFiles('scripts/build-libgit2.sh') }}
+
+      - name: Build libgit2
+        if: steps.libgit2.outputs.cache-hit != 'true'
+        run: scripts/build-libgit2.sh
+
+      - name: Cache FFmpeg
+        id: ffmpeg
+        uses: actions/cache@v5
+        with:
+          path: vendor/ffmpeg/FFmpeg.xcframework
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('scripts/fetch-ffmpeg.sh', 'scripts/build-ffmpeg.sh', 'native/ffmpeg/**') }}
+
+      - name: Fetch FFmpeg
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: scripts/fetch-ffmpeg.sh
+
+      - name: Install xcodegen
+        run: |
+          command -v xcodegen >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+          xcodegen --version
+
+      - name: Assemble engine
+        run: scripts/build-engine.sh
+
+      - name: Generate project
+        working-directory: app
+        run: xcodegen generate --quiet
+
+      - name: Build for simulator (Debug)
+        working-directory: app
+        run: |
+          set -o pipefail
+          xcodebuild -project DshIOS.xcodeproj -scheme DshIOS \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/DerivedData \
+            -skipPackagePluginValidation \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Pick a simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          xcrun simctl list runtimes
+          DEV="$(xcrun simctl list devices available -j | python3 -c 'import json,sys
+          data = json.load(sys.stdin)["devices"]
+          best = None
+          for runtime, devices in data.items():
+              for d in devices:
+                  if "iPhone" in d["name"]:
+                      best = d["name"]
+          print(best or "")')"
+          test -n "$DEV" || { echo "no iPhone simulator runtime on this runner" >&2; exit 1; }
+          echo "device=$DEV" | tee -a "$GITHUB_OUTPUT"
+          xcrun simctl boot "$DEV" 2>/dev/null || true
+          xcrun simctl bootstatus "$DEV" -b
+
+      - name: Smoke test (screens + engine assertions)
+        env:
+          SIM_DEVICE: ${{ steps.sim.outputs.device }}
+          SMOKE_SCREENS: key
+        run: |
+          set -o pipefail
+          scripts/smoke-sim.sh app/build/smoke 2>&1 | tee smoke.log
+          echo "== assertions =="
+          grep -E '^(ok|FAIL|smoke:)' smoke.log || true
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: sim-smoke-screens
+          path: |
+            app/build/smoke/**/*.png
+            smoke.log
+          if-no-files-found: warn
+          retention-days: 7
