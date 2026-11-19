@@ -6,7 +6,7 @@ name: ipa-unsigned
 # packages Payload/ by hand (Xcode's export needs a signing team).
 on:
   push:
-    branches: [ipa-build]
+    branches: [ipa-build, ipa-build2]
   workflow_dispatch:
 
 permissions:
@@ -114,6 +114,7 @@ jobs:
             -derivedDataPath build/DerivedData \
             -skipPackagePluginValidation \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            OTHER_LDFLAGS="$(inherited) -Wl,-no_fixup_chains" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             archive
 
@@ -153,7 +154,7 @@ jobs:
           rm -rf build/Payload build/*.ipa
           mkdir -p build/Payload
           cp -R "$APP" build/Payload/
-          IPA="$GITHUB_WORKSPACE/DSH-$VERSION-$BUILD-nowatch-unsigned.ipa"
+          IPA="$GITHUB_WORKSPACE/DSH-$VERSION-$BUILD-nofixup-unsigned.ipa"
           ( cd build && ditto -c -k --sequesterRsrc --keepParent Payload "$IPA" )
           ls -lh "$IPA"
           shasum -a 256 "$IPA" | tee "$IPA.sha256"
